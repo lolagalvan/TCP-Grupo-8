@@ -1,0 +1,61 @@
+import javax.crypto.BadPaddingException;
+import javax.crypto.Cipher;
+import javax.crypto.IllegalBlockSizeException;
+import javax.crypto.NoSuchPaddingException;
+import java.io.ObjectInputStream;
+import java.net.Socket;
+import java.nio.charset.StandardCharsets;
+import java.security.*;
+
+public class ClienteHiloR implements Runnable {
+
+    private Socket clienteSocket;
+    private PublicKey publicKey;
+    private PrivateKey privateKey;
+
+    public ClienteHiloR(Socket clienteSocket, PublicKey publicKey, PrivateKey privateKey) {
+        this.clienteSocket = clienteSocket;
+        this.publicKey = publicKey;
+        this.privateKey = privateKey;
+    }
+
+    @Override
+    public void run() {
+        try {
+            ObjectInputStream inputStream = new ObjectInputStream(clienteSocket.getInputStream());
+
+            while (true) {
+
+                Object object = inputStream.readObject();
+                Mensaje mensajeRecibido = (Mensaje) object;
+                verificarMensaje(mensajeRecibido, clienteSocket);
+            }
+        } catch (Throwable e) {
+            e.printStackTrace();
+        }
+    }
+
+    public void verificarMensaje(Mensaje mensaje, Socket cliente) throws InvalidKeyException, NoSuchPaddingException, NoSuchAlgorithmException, IllegalBlockSizeException, BadPaddingException {
+
+        Cipher desencriptar = Cipher.getInstance("RSA");
+        desencriptar.init(Cipher.DECRYPT_MODE, this.privateKey);
+
+        Cipher desencriptar2 = Cipher.getInstance("RSA");
+        desencriptar2.init(Cipher.DECRYPT_MODE, this.publicKey);
+
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+
+        byte[] desencriptadoByte = desencriptar.doFinal(mensaje.getEncriptado());
+        String desencriptado = new String(desencriptadoByte, StandardCharsets.UTF_8);
+
+        byte[] hasheadoByte = desencriptar2.doFinal(mensaje.getHasheado());
+        String hasheado = new String(hasheadoByte, StandardCharsets.UTF_8);
+
+        byte[] desencriptadoHasheadoByte = digest.digest(desencriptado.getBytes(StandardCharsets.UTF_8));
+        String desencriptadoHasheado = new String(desencriptadoHasheadoByte, StandardCharsets.UTF_8);
+
+        if (hasheado.equals(desencriptadoHasheado)){
+            System.out.println(new String(desencriptado));
+        }
+    }
+}
