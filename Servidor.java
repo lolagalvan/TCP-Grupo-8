@@ -1,109 +1,206 @@
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
+import javax.crypto.BadPaddingException;
+import javax.crypto.Cipher;
+import javax.crypto.IllegalBlockSizeException;
+import javax.crypto.NoSuchPaddingException;
+import java.io.*;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.util.ArrayList;
-import java.util.List;
+import java.nio.charset.StandardCharsets;
+import java.security.*;
+import java.security.spec.InvalidKeySpecException;
+import java.security.spec.X509EncodedKeySpec;
+import java.util.*;
 
 public class Servidor {
 
-// creamos un ArrayList que almacenará las conexiones de los clientes que se conectan al servidor.
+    private HashMap<Socket, PublicKey> clientes;
+    private static Llaves llaves;
 
-    private List<Socket> clientes;
-
-    public Servidor() {
-        clientes = new ArrayList<>();
+    static {
+        try {
+            llaves = generarLlave(2048);
+        } catch (NoSuchAlgorithmException e) {
+            throw new RuntimeException(e);
+        } catch (NoSuchPaddingException e) {
+            throw new RuntimeException(e);
+        } catch (InvalidKeyException e) {
+            throw new RuntimeException(e);
+        } catch (IllegalBlockSizeException e) {
+            throw new RuntimeException(e);
+        } catch (BadPaddingException e) {
+            throw new RuntimeException(e);
+        }
     }
 
-    public void start(int puerto) {
+    public static Llaves generarLlave(int size) throws NoSuchAlgorithmException,NoSuchPaddingException, InvalidKeyException, IllegalBlockSizeException, BadPaddingException  {
+
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA");
+        kpg.initialize(size);
+        KeyPair kp = kpg.genKeyPair();
+
+        PublicKey publicKey = kp.getPublic();
+        PrivateKey privateKey = kp.getPrivate();
+
+        Llaves llaves = new Llaves(publicKey,privateKey);
+        return llaves;
+    }
+
+
+    public Servidor(){
+        clientes = new HashMap<>();
+    }
+
+    public void start(int port) {
         try {
-// se crea un ServerSocket que escucha en un puerto específico
-            ServerSocket servidorSocket = new ServerSocket(puerto);
-            System.out.println("Servidor iniciado en el puerto " + puerto);
+            ServerSocket serverSocket = new ServerSocket(port);
+            System.out.println("Servidor iniciado en el puerto " + port);
 
-
-//entra en un bucle infinito donde acepta conexiones de clientes entrantes.
             while (true) {
+                Socket Csocket = serverSocket.accept();
+                PublicKey publicaCliente = null;
 
-//Cuando un cliente se conecta, se crea una instancia de Socket y se agrega a la lista de clientes
+                enviarKey(Csocket, llaves.getPublicKey());
+                publicaCliente = recibirKey(Csocket);
 
-                Socket clienteSocket = servidorSocket.accept();
-                clientes.add(clienteSocket);
-                System.out.println("Nuevo cliente conectado: " + clienteSocket.getInetAddress().getHostAddress());
+                clientes.put(Csocket, publicaCliente);
+                System.out.println("Nuevo cliente conectado: " + Csocket.getInetAddress().getHostAddress());
 
-/* Luego se inicia un hilo (Thread) llamado ClientHandler para manejar la comunicación
-con ese cliente en particular. Esto permite que varios clientes se conecten
-y comuniquen simultáneamente */
+                ClientHandler clientHandler = new ClientHandler(Csocket);
+                Thread clientThread = new Thread(clientHandler);
+                clientThread.start();
 
-                ClientHandler clientHandler = new ClientHandler(clienteSocket);
-                Thread hiloCliente = new Thread(clientHandler);
-                hiloCliente.start();
             }
-        } catch (IOException e) {
+        } catch (IOException | NoSuchAlgorithmException | InvalidKeySpecException e) {
             e.printStackTrace();
         }
     }
 
 
-    public void broadcastMensaje(byte[] mensaje, InetAddress ipEmisor) {
-        for (Socket cliente : clientes) { // recorre la lista de clientes y envía el mensaje a todos ellos
+
+    public void enviarKey(Socket socket, PublicKey publicaServer) throws IOException {
+        byte[] publicKeyBytes = llaves.getPublicKey().getEncoded();
+        OutputStream outputStream = socket.getOutputStream();
+        outputStream.write(publicKeyBytes);
+    }
+
+    public PublicKey recibirKey(Socket cliente) throws IOException, NoSuchAlgorithmException, InvalidKeySpecException {
+        InputStream inputStream = cliente.getInputStream();
+        byte[] publicKeyBytes = new byte[2048];
+        inputStream.read(publicKeyBytes);
+
+
+        X509EncodedKeySpec keySpec = new X509EncodedKeySpec(publicKeyBytes);
+        KeyFactory keyFactory = KeyFactory.getInstance("RSA");
+        return keyFactory.generatePublic(keySpec);
+    }
+
+    public String verificarMensaje(Mensaje mensaje, Socket cliente) throws InvalidKeyException, NoSuchPaddingException, NoSuchAlgorithmException, IllegalBlockSizeException, BadPaddingException {
+        Cipher desencriptar = Cipher.getInstance("RSA");
+        desencriptar.init(Cipher.DECRYPT_MODE, llaves.getPrivateKey());
+
+        Cipher desencriptar2 = Cipher.getInstance("RSA");
+        desencriptar2.init(Cipher.DECRYPT_MODE, clientes.get(cliente));
+
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+
+        byte[] desencriptadoByte = desencriptar.doFinal(mensaje.getEncriptado());
+        String desencriptado = new String(desencriptadoByte, StandardCharsets.UTF_8);
+
+        byte[] hasheadoByte = desencriptar2.doFinal(mensaje.getHasheado());
+        String hasheado = new String(hasheadoByte, StandardCharsets.UTF_8);
+
+        byte[] desencriptadoHasheadoByte = digest.digest(desencriptado.getBytes(StandardCharsets.UTF_8));
+        String desencriptadoHasheado = new String(desencriptadoHasheadoByte, StandardCharsets.UTF_8);
+
+        if (hasheado.equals(desencriptadoHasheado)){
+            System.out.println("Mensaje recibido: " + new String(desencriptado));
+            return desencriptado;
+        }
+        return null;
+    }
+
+    public void broadcastMessage(String mensaje, InetAddress ipEnvio) {
+        byte[] encriptadoPublicaCliente;
+        byte[] hasheado;
+        for (Map.Entry<Socket, PublicKey> cliente: clientes.entrySet()) {
             try {
-                if (cliente.getInetAddress() != ipEmisor) {
-                    OutputStream outputStream = cliente.getOutputStream();
-                    outputStream.write(mensaje);
+                if (cliente.getKey().getInetAddress() != ipEnvio){
+                    encriptadoPublicaCliente = encriptarMensaje(mensaje, cliente.getValue());
+                    hasheado = hashearMensaje(mensaje, llaves.getPrivateKey());
+                    Mensaje entero = new Mensaje(encriptadoPublicaCliente, hasheado);
+
+                    ObjectOutputStream outputStream = new ObjectOutputStream(cliente.getKey().getOutputStream());
+                    outputStream.writeObject(entero);
                 }
-            } catch (IOException e) {
+            } catch (Throwable e) {
                 e.printStackTrace();
             }
         }
     }
 
     private class ClientHandler implements Runnable {
-        private Socket clienteSocket;// representa la conexion de un cliente
+        private Socket Csocket;
 
-        public ClientHandler(Socket clienteSocket) {
-            this.clienteSocket = clienteSocket;
+        public ClientHandler(Socket Csocket) {
+            this.Csocket = Csocket;
         }
-
 
         @Override
         public void run() {
             try {
-
-// se obtiene el flujo de entrada (InputStream) del cliente conectado a través del socket clienteSocket.
-// Esto permitirá al servidor leer los datos enviados por el cliente.
-
-                InputStream inputStream = clienteSocket.getInputStream();
+                ObjectInputStream inputStream = new ObjectInputStream(Csocket.getInputStream());
 
                 while (true) {
-                    byte[] buffer = new byte[1024]; // creamos un buffer
-                    int bytesRead = inputStream.read(buffer);//leer datos del flujo de entrada del cliente y almacenarlos en el búfer
-                    if (bytesRead == -1) { //si lee -1 bytes el cliente cerro la conexion
+
+                    Object object = inputStream.readObject();
+                    Mensaje recibido = (Mensaje) object;
+                    String autenticacion;
+                    autenticacion = verificarMensaje(recibido, Csocket);
+
+                    if (autenticacion != null){
+                        broadcastMessage(autenticacion, Csocket.getInetAddress());
+                    } else{
                         break;
                     }
 
-                    byte[] mensaje = new byte[bytesRead]; // se crea un buffer(mensaje) con el tamaño del msj
-                    System.arraycopy(buffer, 0, mensaje, 0, bytesRead); //Se copian los bytes del buffer al buffer mensaje
-                    System.out.println("Mensaje: " + new String(mensaje)); // convertimos msj en string y se imprime
-
-                    broadcastMensaje(mensaje, clienteSocket.getInetAddress()); // se llama al metodo que envia el msj a tds los demás clientes
                 }
 
-                clientes.remove(clienteSocket);//se elimina el socket del cliente de la lista de clientes
-                System.out.println("Cliente se desconecto: " + clienteSocket.getInetAddress().getHostAddress());
-// imprime direccion IP del cliente
-                clienteSocket.close();//se cierra el socket del cliente para liberar recursos
-            } catch (IOException e) {
+                clientes.remove(Csocket);
+                System.out.println("Cliente desconectado: " + Csocket.getInetAddress().getHostAddress());
+                Csocket.close();
+
+
+            } catch (Throwable e) {
                 e.printStackTrace();
             }
         }
     }
 
-    public static void main(String[] args) {
-        Servidor s = new Servidor();
-        s.start(2006);
+    public byte[] encriptarMensaje(String mensaje, PublicKey publicKey) throws NoSuchPaddingException, NoSuchAlgorithmException, InvalidKeyException, IllegalBlockSizeException, BadPaddingException {
+        Cipher encriptar = Cipher.getInstance("RSA");
+        encriptar.init(Cipher.ENCRYPT_MODE, publicKey);
+
+        byte[] mensajeBytes = mensaje.getBytes(StandardCharsets.UTF_8);
+        byte[] encriptado = encriptar.doFinal(mensajeBytes);
+
+        return encriptado;
     }
 
+    public byte[] hashearMensaje(String mensaje, PrivateKey privateKey) throws NoSuchPaddingException, NoSuchAlgorithmException, InvalidKeyException, IllegalBlockSizeException, BadPaddingException {
+        Cipher encriptar = Cipher.getInstance("RSA");
+        encriptar.init(Cipher.ENCRYPT_MODE, privateKey);
+
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        byte[] hasheado = digest.digest(mensaje.getBytes(StandardCharsets.UTF_8));
+
+        byte[] encriptado = encriptar.doFinal(hasheado);
+
+        return encriptado;
+    }
+
+    public static void main(String[] args) {
+        Servidor server = new Servidor();
+        server.start(2106);
+    }
 }
