@@ -83,5 +83,4 @@ public class ClienteHiloE implements Runnable {
         return bytesEncriptados;
     }
 
-
 }
